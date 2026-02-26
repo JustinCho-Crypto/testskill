@@ -1,74 +1,74 @@
 #!/usr/bin/env node
 // SECURITY MANIFEST:
 //   Environment variables accessed: MARKETPLACE_BASE_URL (only)
-//   External endpoints called: {BASE}/ws (Socket.IO), {BASE}/jobs/:id (read-only)
-//   Local files read: ~/.openclaw/marketplace-config.json, /tmp/marketplace_pending.json
-//   Local files written: /tmp/marketplace_pending.json, /tmp/marketplace_result_*, /tmp/preview_*
+//   External endpoints called: {BASE}/ws (Socket.IO)
+//   Local files read: ~/.openclaw/marketplace-config.json
+//   Local files written: /tmp/marketplace_pending.json
 
 'use strict';
 
 const { io } = require('socket.io-client');
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const os = require('os');
-const { execFileSync } = require('child_process');
+const os   = require('os');
 
 const CONFIG_PATH  = path.join(os.homedir(), '.openclaw/marketplace-config.json');
-const SKILL_DIR    = path.join(os.homedir(), '.openclaw/skills/agent-task-marketplace');
 const PENDING_PATH = '/tmp/marketplace_pending.json';
 const BASE_URL     = process.env.MARKETPLACE_BASE_URL || 'http://localhost:3000';
+
+// ─── Notify helper ────────────────────────────────────────────────────────
+// All status updates go through this single function.
+// OpenClaw reads stdout line-by-line and relays each JSON event to Telegram.
+function notify(type, payload = {}) {
+  const line = JSON.stringify({ type, ts: new Date().toISOString(), ...payload });
+  process.stdout.write(line + '\n');
+  process.stderr.write(`[${type}] ${JSON.stringify(payload)}\n`);
+}
 
 // ─── Category fuzzy matching ──────────────────────────────────────────────
 const CATEGORY_GROUPS = {
   visual: [
-    'image_generation', 'illustration', 'art', 'drawing', 'design',
-    'graphic', 'graphic_design', 'photo', 'photography', 'animation',
-    'video', 'render', 'rendering', 'concept_art', 'sketch', 'painting'
+    'image_generation','illustration','art','drawing','design',
+    'graphic','graphic_design','photo','photography','animation',
+    'video','render','rendering','concept_art','sketch','painting'
   ],
   writing: [
-    'copywriting', 'writing', 'content', 'blog', 'article',
-    'editing', 'proofreading', 'storytelling', 'script', 'scriptwriting',
-    'social_media', 'marketing_copy', 'ux_writing'
+    'copywriting','writing','content','blog','article',
+    'editing','proofreading','storytelling','script','scriptwriting',
+    'social_media','marketing_copy','ux_writing'
   ],
-  translation: [
-    'translation', 'translate', 'localization', 'l10n', 'i18n', 'subtitling'
-  ],
+  translation: ['translation','translate','localization','l10n','i18n','subtitling'],
   code: [
-    'code', 'coding', 'programming', 'development', 'software',
-    'web', 'app', 'backend', 'frontend', 'fullstack', 'api', 'automation'
+    'code','coding','programming','development','software',
+    'web','app','backend','frontend','fullstack','api','automation'
   ],
   data: [
-    'data_analysis', 'data', 'analysis', 'research', 'statistics',
-    'excel', 'spreadsheet', 'reporting', 'visualization', 'dashboard'
+    'data_analysis','data','analysis','research','statistics',
+    'excel','spreadsheet','reporting','visualization','dashboard'
   ]
 };
 
-function getGroup(category) {
-  const normalized = category.toLowerCase().replace(/[-\s]/g, '_');
-  for (const [group, aliases] of Object.entries(CATEGORY_GROUPS)) {
-    if (aliases.includes(normalized)) return group;
+function getGroup(cat) {
+  const n = cat.toLowerCase().replace(/[-\s]/g, '_');
+  for (const [g, aliases] of Object.entries(CATEGORY_GROUPS)) {
+    if (aliases.includes(n)) return g;
   }
   return null;
 }
 
 function calcMatch(jobCategory, specialties) {
-  const jobNorm  = jobCategory.toLowerCase().replace(/[-\s]/g, '_');
-  const jobGroup = getGroup(jobNorm);
-
-  // Exact match
-  if (specialties.map(s => s.toLowerCase()).includes(jobNorm)) {
+  const n = jobCategory.toLowerCase().replace(/[-\s]/g, '_');
+  const jobGroup = getGroup(n);
+  if (specialties.map(s => s.toLowerCase()).includes(n)) {
     return { score: 100, label: 'Exact match' };
   }
-
-  // Same group
   if (jobGroup && specialties.some(s => getGroup(s) === jobGroup)) {
     return { score: 80, label: `Related domain (${jobGroup})` };
   }
-
   return { score: 0, label: 'No overlap' };
 }
 
-function assessment(score) {
+function outlook(score) {
   if (score === 100) return '✅ Very likely to deliver well';
   if (score >= 80)   return '🟡 Related skill — likely manageable';
   return '❌ Outside my skill set';
@@ -83,9 +83,7 @@ function loadPending() {
   } catch { return {}; }
 }
 
-function savePending(p) {
-  fs.writeFileSync(PENDING_PATH, JSON.stringify(p, null, 2));
-}
+function savePending(p) { fs.writeFileSync(PENDING_PATH, JSON.stringify(p, null, 2)); }
 
 function addPending(job) {
   const p = loadPending();
@@ -93,15 +91,9 @@ function addPending(job) {
   savePending(p);
 }
 
-function removePending(jobId) {
-  const p = loadPending();
-  delete p[jobId];
-  savePending(p);
-}
-
 // ─── Validate config ──────────────────────────────────────────────────────
 if (!fs.existsSync(CONFIG_PATH)) {
-  console.error('[Marketplace] ERROR: marketplace-config.json not found.');
+  notify('MARKETPLACE_ERROR', { message: 'marketplace-config.json not found. Run onboarding first.' });
   process.exit(1);
 }
 
@@ -109,82 +101,24 @@ let config;
 try {
   config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 } catch (err) {
-  console.error('[Marketplace] ERROR: Failed to parse config:', err.message);
+  notify('MARKETPLACE_ERROR', { message: `Failed to parse config: ${err.message}` });
   process.exit(1);
 }
 
 if (!config.agentId) {
-  console.error('[Marketplace] ERROR: agentId not found. Run register.js first.');
+  notify('MARKETPLACE_ERROR', { message: 'agentId not found. Run register.js first.' });
   process.exit(1);
 }
 
-// ─── --approve / --skip CLI mode ─────────────────────────────────────────
-const args = process.argv.slice(2);
-
-if (args[0] === '--approve' && args[1]) {
-  const jobId  = args[1];
-  const pending = loadPending();
-  const entry  = pending[jobId];
-
-  if (!entry) {
-    console.error(`[Marketplace] No pending job: ${jobId}`);
-    process.exit(1);
-  }
-
-  const job         = entry.job;
-  const budget      = job.spec?.budget ?? 0;
-  const desc        = job.spec?.description || '';
-  const resultPath  = `/tmp/marketplace_result_${jobId}`;
-  const previewPath = `/tmp/preview_${jobId}`;
-
-  try {
-    fs.writeFileSync(resultPath,
-      `Job: ${jobId}\nSpec: ${desc}\n\nGenerated by ${config.agentName}.`
-    );
-
-    execFileSync('node', [
-      `${SKILL_DIR}/scripts/watermark.js`,
-      '--job-id', jobId,
-      '--input', resultPath,
-      '--output', previewPath
-    ]);
-    console.log('[Marketplace] 🖼  Preview generated');
-
-    const introduction = `Hi, I'm ${config.agentName}. I specialize in ${config.specialties.join(', ')}.`;
-    execFileSync('node', [
-      `${SKILL_DIR}/scripts/bid.js`,
-      '--job-id', jobId,
-      '--preview', previewPath,
-      '--price', String(budget),
-      '--introduction', introduction
-    ], { env: { ...process.env, MARKETPLACE_BASE_URL: BASE_URL } });
-
-    if (fs.existsSync(resultPath)) fs.unlinkSync(resultPath);
-    if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
-
-    removePending(jobId);
-    console.log(`[Marketplace] ✅ Bid submitted — Job #${jobId}`);
-  } catch (err) {
-    console.error('[Marketplace] ERROR:', err.message);
-    if (fs.existsSync(resultPath)) fs.unlinkSync(resultPath);
-    if (fs.existsSync(previewPath)) fs.unlinkSync(previewPath);
-    process.exit(1);
-  }
-  process.exit(0);
-}
-
-if (args[0] === '--skip' && args[1]) {
-  removePending(args[1]);
-  console.log(`[Marketplace] ⏭  Skipped Job #${args[1]}`);
-  process.exit(0);
-}
-
-// ─── Daemon mode — Socket.IO listener ────────────────────────────────────
-console.log(`[Marketplace] Agent  : ${config.agentName} (${config.agentId})`);
-console.log(`[Marketplace] Skills : ${config.specialties.join(', ')}`);
-console.log(`[Marketplace] Budget : max ${config.maxBudget}`);
-console.log(`[Marketplace] Server : ${BASE_URL}`);
-console.log('[Marketplace] Connecting...');
+// ─── Socket.IO daemon ─────────────────────────────────────────────────────
+notify('MARKETPLACE_STARTING', {
+  agent: config.agentName,
+  agentId: config.agentId,
+  specialties: config.specialties,
+  maxBudget: config.maxBudget,
+  server: BASE_URL,
+  message: `🚀 Starting marketplace listener for ${config.agentName}...`
+});
 
 const socket = io(BASE_URL, {
   path: '/ws',
@@ -195,20 +129,27 @@ const socket = io(BASE_URL, {
 });
 
 socket.on('connect', () => {
-  console.log('[Marketplace] ✅ Connected. Waiting for jobs...');
+  notify('MARKETPLACE_CONNECTED', {
+    message: `🔌 Connected to marketplace. Waiting for jobs...`
+  });
 });
 
 socket.on('disconnect', (reason) => {
-  console.log(`[Marketplace] Disconnected: ${reason}. Reconnecting...`);
+  notify('MARKETPLACE_DISCONNECTED', {
+    reason,
+    message: `⚠️ Disconnected (${reason}). Reconnecting...`
+  });
 });
 
 socket.on('connect_error', (err) => {
-  console.error('[Marketplace] Connection error:', err.message);
+  notify('MARKETPLACE_ERROR', {
+    message: `❌ Connection error: ${err.message}`
+  });
 });
 
 socket.on('ping', () => {
   socket.emit('pong');
-  console.log('[Marketplace] 💓 Heartbeat sent');
+  notify('MARKETPLACE_HEARTBEAT', { message: `💓 Heartbeat sent` });
 });
 
 socket.on('new-job', (job) => {
@@ -217,61 +158,59 @@ socket.on('new-job', (job) => {
   const budget   = job.spec?.budget ?? 0;
   const desc     = job.spec?.description || '(no description)';
 
-  console.log(`\n[Marketplace] 📨 New job received: ${jobId}`);
+  notify('MARKETPLACE_JOB_RECEIVED', {
+    jobId, category, budget,
+    message: `📨 New job received — ${category} / budget: ${budget}`
+  });
 
   // Hard skip: budget exceeded
   if (budget > config.maxBudget) {
-    console.log(`[Marketplace] SKIP — budget exceeded (${budget} > ${config.maxBudget})`);
+    notify('MARKETPLACE_JOB_SKIPPED', {
+      jobId, reason: 'budget_exceeded',
+      message: `⏭ Skipped — budget ${budget} exceeds my max ${config.maxBudget}`
+    });
     return;
   }
 
   const { score, label } = calcMatch(category, config.specialties);
 
-  // Hard skip: zero overlap
+  // Hard skip: no overlap
   if (score === 0) {
-    console.log(`[Marketplace] SKIP — no skill group overlap (${category})`);
+    notify('MARKETPLACE_JOB_SKIPPED', {
+      jobId, category, score, reason: 'no_skill_overlap',
+      message: `⏭ Skipped — "${category}" doesn't match my skills (${config.specialties.join(', ')})`
+    });
     return;
   }
 
-  // Save to pending queue
+  // Eligible — save to pending, ask user
   addPending(job);
 
-  // Print notification for OpenClaw to relay to user
-  const message = [
-    `📋 New job on the marketplace!`,
-    ``,
-    `  Job ID   : ${jobId}`,
-    `  Category : ${category}`,
-    `  Budget   : ${budget}`,
-    `  Desc     : ${desc}`,
-    ``,
-    `  Match    : ${score}% — ${label}`,
-    `  My skills: ${config.specialties.join(', ')}`,
-    `  Outlook  : ${assessment(score)}`,
-    ``,
-    `Should I bid on this job?`,
-    `  ✅ Yes → reply: bid ${jobId}`,
-    `  ❌ No  → reply: skip ${jobId}`
-  ].join('\n');
-
-  console.log('\n' + message + '\n');
-
-  // Structured output for OpenClaw to parse
-  process.stdout.write(JSON.stringify({
-    type: 'MARKETPLACE_JOB_PENDING',
-    jobId,
-    category,
-    budget,
-    description: desc,
-    matchScore: score,
-    matchLabel: label,
-    assessment: assessment(score),
-    message
-  }) + '\n');
+  notify('MARKETPLACE_JOB_PENDING', {
+    jobId, category, budget, description: desc,
+    matchScore: score, matchLabel: label,
+    assessment: outlook(score),
+    message: [
+      `📋 New job — awaiting your decision`,
+      ``,
+      `  Job ID   : ${jobId}`,
+      `  Category : ${category}`,
+      `  Budget   : ${budget}`,
+      `  Desc     : ${desc}`,
+      ``,
+      `  Match    : ${score}% — ${label}`,
+      `  My skills: ${config.specialties.join(', ')}`,
+      `  Outlook  : ${outlook(score)}`,
+      ``,
+      `Should I bid?`,
+      `  ✅ Yes → bid ${jobId}`,
+      `  ❌ No  → skip ${jobId}`
+    ].join('\n')
+  });
 });
 
 process.on('SIGINT', () => {
-  console.log('\n[Marketplace] Shutting down.');
+  notify('MARKETPLACE_STOPPED', { message: '🛑 Marketplace listener stopped.' });
   socket.disconnect();
   process.exit(0);
 });
