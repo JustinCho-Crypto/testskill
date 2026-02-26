@@ -26,7 +26,7 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv);
 
 if (!args['job-id'] || !args.preview || !args.price || !args.introduction) {
-  console.error('[Bid] Usage: bid.js --job-id <id> --preview <path> --price <amount> --introduction <text>');
+  console.error('[Bid] Usage: bid.js --job-id <id> --preview <path> --price <n> --introduction <text>');
   process.exit(1);
 }
 
@@ -36,7 +36,6 @@ if (!previewPath.startsWith('/tmp/')) {
   console.error('[Bid] ERROR: Preview path must be under /tmp/');
   process.exit(1);
 }
-
 if (!fs.existsSync(previewPath)) {
   console.error(`[Bid] ERROR: Preview file not found: ${previewPath}`);
   process.exit(1);
@@ -55,48 +54,40 @@ if (!config.agentId) {
   process.exit(1);
 }
 
-// Detect mime type from extension
-const ext     = path.extname(previewPath).toLowerCase();
-const mimeMap = {
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp', '.gif': 'image/gif'
-};
+// Mime type from extension
+const ext      = path.extname(previewPath).toLowerCase();
+const mimeMap  = { '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.webp':'image/webp', '.gif':'image/gif' };
 const mimeType = mimeMap[ext] || 'image/png';
 
-// ── Step 1: Upload preview ─────────────────────────────────────────────────
+// ── Step 1: Upload ─────────────────────────────────────────────────────────
 console.log(`[Bid] Uploading preview (${mimeType})...`);
 
-const uploadResult = spawnSync('curl', [
+const upload = spawnSync('curl', [
   '-v', '-X', 'POST',
   `${BASE_URL}/upload/image?purpose=bid_preview`,
   '-F', `file=@${previewPath};type=${mimeType}`
 ], { encoding: 'utf-8' });
 
-if (uploadResult.error) {
-  console.error('[Bid] ERROR: curl failed:', uploadResult.error.message);
+if (upload.error) {
+  console.error('[Bid] ERROR: curl failed:', upload.error.message);
   process.exit(1);
 }
 
-const uploadBody    = uploadResult.stdout.trim();
-const uploadVerbose = uploadResult.stderr || '';
+const uploadStatus = parseInt((upload.stderr.match(/< HTTP\/[\d.]+ (\d+)/) || [])[1]);
 
-// Extract HTTP status
-const uploadStatus = (uploadVerbose.match(/< HTTP\/[\d.]+ (\d+)/) || [])[1];
-
-if (!uploadBody || (uploadStatus && parseInt(uploadStatus) >= 400)) {
+if (!upload.stdout || (uploadStatus && uploadStatus >= 400)) {
   console.error(`[Bid] ERROR: Upload failed (HTTP ${uploadStatus})`);
-  console.error('[Bid] Response:', uploadBody);
-  console.error('[Bid] Verbose:', uploadVerbose.slice(-300));
+  console.error('[Bid] Response:', upload.stdout);
   process.exit(1);
 }
 
 let previewUrl;
 try {
-  previewUrl = JSON.parse(uploadBody).url;
+  previewUrl = JSON.parse(upload.stdout.trim()).url;
   if (!previewUrl) throw new Error('No URL in response');
   console.log(`[Bid] 📤 Uploaded: ${previewUrl}`);
 } catch (err) {
-  console.error('[Bid] ERROR: Failed to parse upload response:', uploadBody);
+  console.error('[Bid] ERROR: Failed to parse upload response:', upload.stdout);
   process.exit(1);
 }
 
@@ -108,27 +99,20 @@ const bidPayload = JSON.stringify({
   price: Number(args.price)
 });
 
-const bidResult = spawnSync('curl', [
+const bid = spawnSync('curl', [
   '-v', '-X', 'POST',
   `${BASE_URL}/jobs/${args['job-id']}/bids`,
   '-H', 'Content-Type: application/json',
   '-d', bidPayload
 ], { encoding: 'utf-8' });
 
-const bidVerbose = bidResult.stderr || '';
-const httpStatus = parseInt((bidVerbose.match(/< HTTP\/[\d.]+ (\d+)/) || [])[1]);
+const bidStatus = parseInt((bid.stderr.match(/< HTTP\/[\d.]+ (\d+)/) || [])[1]);
 
-if (httpStatus === 409) {
-  console.log(`[Bid] SKIP — Already bid on Job #${args['job-id']}`);
-  process.exit(0);
-}
-if (httpStatus === 400) {
-  console.log(`[Bid] SKIP — Job #${args['job-id']} is no longer open`);
-  process.exit(0);
-}
-if (bidResult.status !== 0 || (httpStatus && httpStatus >= 400)) {
-  console.error(`[Bid] ERROR: Bid failed (HTTP ${httpStatus})`);
-  console.error('[Bid] Response:', bidResult.stdout);
+if (bidStatus === 409) { console.log(`[Bid] SKIP — Already bid on Job #${args['job-id']}`); process.exit(0); }
+if (bidStatus === 400) { console.log(`[Bid] SKIP — Job #${args['job-id']} no longer open`); process.exit(0); }
+
+if (bid.status !== 0 || (bidStatus && bidStatus >= 400)) {
+  console.error(`[Bid] ERROR: Bid failed (HTTP ${bidStatus}):`, bid.stdout);
   process.exit(1);
 }
 

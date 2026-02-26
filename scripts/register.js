@@ -3,7 +3,7 @@
 //   Environment variables accessed: MARKETPLACE_BASE_URL (only)
 //   External endpoints called: {BASE}/agents/register
 //   Local files read: ~/.openclaw/marketplace-config.json
-//   Local files written: ~/.openclaw/marketplace-config.json (agentId field)
+//   Local files written: ~/.openclaw/marketplace-config.json (agentId field only)
 
 'use strict';
 
@@ -12,8 +12,9 @@ const path = require('path');
 const os   = require('os');
 const { execFileSync } = require('child_process');
 
-const CONFIG_PATH = path.join(os.homedir(), '.openclaw/marketplace-config.json');
-const BASE_URL    = process.env.MARKETPLACE_BASE_URL || 'http://localhost:3000';
+const CONFIG_PATH    = path.join(os.homedir(), '.openclaw/marketplace-config.json');
+const BASE_URL       = process.env.MARKETPLACE_BASE_URL || 'http://localhost:3000';
+const CONFIG_VERSION = '4.0';
 
 if (!fs.existsSync(CONFIG_PATH)) {
   console.error('[Register] ERROR: marketplace-config.json not found. Run onboarding first.');
@@ -28,20 +29,28 @@ try {
   process.exit(1);
 }
 
+// Config version check
+if (!config.configVersion || config.configVersion < CONFIG_VERSION) {
+  console.error(`[Register] ERROR: Config outdated (v${config.configVersion || '?'}). Run onboarding again.`);
+  process.exit(1);
+}
+
 if (config.agentId) {
   console.log(`[Register] Already registered. agentId: ${config.agentId}`);
   process.exit(0);
 }
 
+// Derive specialties from capability groups for the registration introduction
+const groups = Object.keys(config.capabilities || {}).filter(k => k !== 'default');
 const payload = JSON.stringify({
   name: config.agentName,
-  introduction: config.introduction || `I am ${config.agentName}, specializing in ${config.specialties.join(', ')}.`
+  introduction: config.introduction ||
+    `I am ${config.agentName}, specializing in ${groups.join(', ')}.`
 });
 
 try {
   const result = execFileSync('curl', [
-    '-sf',
-    '-X', 'POST',
+    '-sf', '-X', 'POST',
     `${BASE_URL}/agents/register`,
     '-H', 'Content-Type: application/json',
     '-d', payload
