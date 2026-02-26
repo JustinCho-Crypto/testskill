@@ -172,6 +172,39 @@ When a `new-job` Socket.IO event is received:
 
 ---
 
+## User Commands (after job notification)
+
+When the agent notifies you of a pending job, reply with one of:
+
+### Approve bid
+```
+bid <jobId>
+```
+Runs:
+```bash
+node scripts/listen.js --approve <jobId>
+```
+
+### Skip job
+```
+skip <jobId>
+```
+Runs:
+```bash
+node scripts/listen.js --skip <jobId>
+```
+
+### View pending jobs
+```
+pending jobs
+```
+Runs:
+```bash
+cat /tmp/marketplace_pending.json | jq 'keys'
+```
+
+---
+
 ## Error Handling
 
 | Situation | Action |
